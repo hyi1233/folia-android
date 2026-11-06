@@ -40,10 +40,16 @@ export type NativeBackOutcome = 'handled' | 'background' | 'exit';
  * 没人消费：退到后台，让前台播放服务继续跑。以前这里直接 `exitApp()`，结束 Activity 会连带收掉
  * WebView 与播放服务，用户看到的就是「退出应用就自动暂停播放」。老桥没有 moveTaskToBack 时
  * 退回原来的退出行为，避免按返回键完全没反应。
+ *
+ * TV 体验补丁：没有层可关时，若上一次同状态返回距今不超过 2 秒（即「连按两次返回」），
+ * 视为明确的退出意图，改走 exitApp() 真正结束 Activity 并连带停掉前台播放服务；
+ * 单次返回仍退到后台，保留锁屏/后台听歌的使用习惯。
  */
 export const applyNativeBackPress = (
     plugin: Pick<NativeBackPlugin, 'exitApp' | 'moveTaskToBack' | 'recordRuntimeDiagnostic'>,
     handled: boolean,
+    now: number = Date.now(),
+    lastUnhandledAtRef?: { value: number },
 ): NativeBackOutcome => {
     if (handled) {
         void plugin.recordRuntimeDiagnostic?.({
@@ -53,10 +59,27 @@ export const applyNativeBackPress = (
             message: 'A layer handled Escape',
             stack: '',
         }).catch(() => undefined);
+        if (lastUnhandledAtRef) lastUnhandledAtRef.value = 0;
         return 'handled';
     }
 
     const canMoveToBackground = typeof plugin.moveTaskToBack === 'function';
+    const lastUnhandledAt = lastUnhandledAtRef?.value ?? 0;
+    const isDoublePress = lastUnhandledAt > 0 && now - lastUnhandledAt <= 2000;
+    if (lastUnhandledAtRef) lastUnhandledAtRef.value = isDoublePress ? 0 : now;
+
+    if (isDoublePress) {
+        void plugin.recordRuntimeDiagnostic?.({
+            source: 'activity-lifecycle',
+            thread: 'webview',
+            type: 'back-double-exit',
+            message: 'Second unhandled Back within 2s; requesting app exit',
+            stack: '',
+        }).catch(() => undefined);
+        void plugin.exitApp().catch(() => undefined);
+        return 'exit';
+    }
+
     void plugin.recordRuntimeDiagnostic?.({
         source: 'activity-lifecycle',
         thread: 'webview',
@@ -83,6 +106,7 @@ export const useNativeBackButton = (): void => {
 
         let disposed = false;
         let listenerHandle: { remove: () => Promise<void> } | { remove: () => void } | null = null;
+        const lastUnhandledAtRef = { value: 0 };
         const registered = plugin.addListener('backButton', () => {
             if (disposed) return;
             const event = new KeyboardEvent('keydown', {
@@ -92,7 +116,7 @@ export const useNativeBackButton = (): void => {
                 cancelable: true,
             });
             const handled = !window.dispatchEvent(event) || event.defaultPrevented;
-            applyNativeBackPress(plugin, handled);
+            applyNativeBackPress(plugin, handled, Date.now(), lastUnhandledAtRef);
         });
 
         Promise.resolve(registered)
