@@ -42,7 +42,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon "-Dorg.gradle.java.home=$JAVA_HOME"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
